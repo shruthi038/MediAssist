@@ -11,9 +11,12 @@ from app.api.deps import get_current_user
 from app.db.models.user import User
 from app.db.models.prescription import Prescription
 from app.db.models.medicine import Medicine
+from app.db.models.reminder import Reminder
 from app.services.storage_service import StorageService
 from app.services.gemini_service import GeminiService
+from app.services.reminder_service import ReminderService
 from sqlmodel import select
+from datetime import time
 
 router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
 
@@ -279,4 +282,114 @@ async def extract_medicines_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Medicine extraction failed: {str(e)}"
+        )
+
+class ReminderResponseModel(BaseModel):
+    id: str
+    medicine_name: Optional[str]
+    dose_description: Optional[str]
+    reminder_time: Optional[time]
+    frequency: Optional[str]
+    reminder_type: str
+    status: str
+
+class GenerateRemindersResponse(BaseModel):
+    message: str
+    reminder_count: int
+    reminders: List[ReminderResponseModel]
+
+@router.post("/{prescription_id}/generate-reminders", response_model=GenerateRemindersResponse)
+async def generate_reminders_endpoint(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    # Fetch prescription
+    prescription = session.get(Prescription, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+        
+    if str(prescription.user_id) != str(current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this prescription")
+        
+    # Check if medicines have been extracted
+    if prescription.processing_status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Medicine extraction has not been completed yet"
+        )
+        
+    # Idempotency check: look for existing reminders linked to this prescription
+    existing_reminders = session.exec(
+        select(Reminder).where(Reminder.prescription_id == prescription.id)
+    ).all()
+    
+    if existing_reminders:
+        response_list = [
+            ReminderResponseModel(
+                id=str(r.id),
+                medicine_name=r.medicine_name,
+                dose_description=r.dose_description,
+                reminder_time=r.reminder_time,
+                frequency=r.frequency,
+                reminder_type=r.reminder_type,
+                status=r.status
+            ) for r in existing_reminders
+        ]
+        return GenerateRemindersResponse(
+            message="Reminders already generated",
+            reminder_count=len(response_list),
+            reminders=response_list
+        )
+        
+    # Fetch medicines
+    medicines = session.exec(
+        select(Medicine).where(Medicine.prescription_id == prescription.id)
+    ).all()
+    
+    if not medicines:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No medicines found to generate reminders for")
+        
+    all_reminders = []
+    
+    try:
+        # Generate and save reminders
+        for med in medicines:
+            new_reminders = ReminderService.generate_reminders(
+                medicine=med,
+                user_id=str(current_user.id),
+                prescription_id=str(prescription.id)
+            )
+            for r in new_reminders:
+                session.add(r)
+                all_reminders.append(r)
+                
+        session.commit()
+        
+        # Refresh all to get IDs
+        for r in all_reminders:
+            session.refresh(r)
+            
+        response_list = [
+            ReminderResponseModel(
+                id=str(r.id),
+                medicine_name=r.medicine_name,
+                dose_description=r.dose_description,
+                reminder_time=r.reminder_time,
+                frequency=r.frequency,
+                reminder_type=r.reminder_type,
+                status=r.status
+            ) for r in all_reminders
+        ]
+        
+        return GenerateRemindersResponse(
+            message="Reminders generated successfully",
+            reminder_count=len(response_list),
+            reminders=response_list
+        )
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate reminders: {str(e)}"
         )
