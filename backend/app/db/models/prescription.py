@@ -7,10 +7,12 @@ from app.db.models.user import get_utc_now
 class Prescription(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     user_id: uuid.UUID = Field(foreign_key="user.id")
-    image_url: str
-    status: str = Field(default="pending")
+    original_filename: Optional[str] = None
+    file_path: str
+    raw_text: Optional[str] = None
+    processing_status: str = Field(default="uploaded")
     is_confirmed: bool = Field(default=False)
-    created_at: datetime = Field(default_factory=get_utc_now)
+    uploaded_at: datetime = Field(default_factory=get_utc_now)
     updated_at: datetime = Field(default_factory=get_utc_now)
 
     user: "User" = Relationship(back_populates="prescriptions")

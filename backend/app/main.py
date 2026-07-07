@@ -7,6 +7,7 @@ import uvicorn
 from app.db.database import engine, get_session
 from app.db.models import *
 from app.api.auth import router as auth_router
+from app.api.prescriptions import router as prescriptions_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +23,7 @@ app = FastAPI(
 )
 
 app.include_router(auth_router)
+app.include_router(prescriptions_router)
 
 # Allow CORS for local development
 app.add_middleware(
