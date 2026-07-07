@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlmodel import Session
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import uuid
 import os
@@ -10,8 +10,10 @@ from app.db.database import get_session
 from app.api.deps import get_current_user
 from app.db.models.user import User
 from app.db.models.prescription import Prescription
+from app.db.models.medicine import Medicine
 from app.services.storage_service import StorageService
 from app.services.gemini_service import GeminiService
+from sqlmodel import select
 
 router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
 
@@ -160,4 +162,121 @@ async def perform_ocr(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"OCR processing failed: {str(e)}"
+        )
+
+class ExtractedMedicine(BaseModel):
+    medicine_name: str
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    duration: Optional[str] = None
+    instructions: Optional[str] = None
+    confidence_score: Optional[float] = None
+
+class ExtractionResponse(BaseModel):
+    message: str
+    medicine_count: int
+    medicines: List[ExtractedMedicine]
+
+@router.post("/{prescription_id}/extract-medicines", response_model=ExtractionResponse)
+async def extract_medicines_endpoint(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    # Fetch prescription
+    prescription = session.get(Prescription, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+        
+    if str(prescription.user_id) != str(current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this prescription")
+        
+    # Check if medicines already exist (idempotency)
+    existing_medicines = session.exec(
+        select(Medicine).where(Medicine.prescription_id == prescription.id)
+    ).all()
+    
+    if existing_medicines:
+        # Map DB records to API response
+        extracted_list = [
+            ExtractedMedicine(
+                medicine_name=m.name,
+                dosage=m.dosage,
+                frequency=m.frequency,
+                duration=m.duration,
+                instructions=m.special_instructions,
+                confidence_score=1.0 # Default fallback since DB doesn't store it
+            ) for m in existing_medicines
+        ]
+        return ExtractionResponse(
+            message="Medicines already extracted",
+            medicine_count=len(extracted_list),
+            medicines=extracted_list
+        )
+        
+    # Verify OCR is completed
+    if prescription.processing_status not in ["ocr_completed", "completed"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="OCR has not been completed for this prescription yet"
+        )
+        
+    if not prescription.raw_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="No extracted OCR text found"
+        )
+
+    # Update status to AI processing
+    try:
+        prescription.processing_status = "ai_processing"
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database update failed")
+        
+    try:
+        # Call Gemini Service
+        medicines_data = GeminiService.extract_medicines(prescription.raw_text)
+        
+        extracted_list = []
+        # Save to DB
+        for item in medicines_data:
+            # Map JSON to DB model
+            med = Medicine(
+                prescription_id=prescription.id,
+                name=item.get("medicine_name", "Unknown"),
+                dosage=item.get("dosage"),
+                frequency=item.get("frequency"),
+                duration=item.get("duration"),
+                special_instructions=item.get("instructions")
+            )
+            session.add(med)
+            
+            # Map JSON to API response (including confidence score)
+            extracted_list.append(
+                ExtractedMedicine(
+                    medicine_name=item.get("medicine_name", "Unknown"),
+                    dosage=item.get("dosage"),
+                    frequency=item.get("frequency"),
+                    duration=item.get("duration"),
+                    instructions=item.get("instructions"),
+                    confidence_score=item.get("confidence_score", 1.0)
+                )
+            )
+            
+        prescription.processing_status = "completed"
+        session.commit()
+        
+        return ExtractionResponse(
+            message="Medicine extraction completed",
+            medicine_count=len(extracted_list),
+            medicines=extracted_list
+        )
+    except Exception as e:
+        prescription.processing_status = "ocr_completed" # Rollback state
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Medicine extraction failed: {str(e)}"
         )
