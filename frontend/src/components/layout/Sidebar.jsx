@@ -18,7 +18,7 @@ const navItems = [
   { path: '/dashboard/documents', label: 'Medical Documents', icon: Files },
   { path: '/dashboard/medicines', label: 'Medicines', icon: Pill },
   { path: '/dashboard/reminders', label: 'Reminders', icon: Clock },
-  { path: '/dashboard/ai', label: 'AI Health Assistant', icon: Bot, comingSoon: true },
+  { path: '/dashboard/assistant', label: 'AI Health Assistant', icon: Bot },
   { path: '/dashboard/profile', label: 'Profile', icon: User },
 ];
 

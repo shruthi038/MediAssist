@@ -9,6 +9,7 @@ from app.db.models import *
 from app.api.auth import router as auth_router
 from app.api.prescriptions import router as prescriptions_router
 from app.api.documents import router as documents_router
+from app.api.assistant import router as assistant_router
 from app.core.config import settings
 from app.db.database import engine
 from supabase import create_client
@@ -32,6 +33,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(prescriptions_router)
 app.include_router(documents_router)
+app.include_router(assistant_router)
 
 # Allow CORS for local development
 app.add_middleware(

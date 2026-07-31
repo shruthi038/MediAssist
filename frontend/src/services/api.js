@@ -160,3 +160,32 @@ export const generateSummary = async (id) => {
   return await authFetch(`${API_BASE_URL}/prescriptions/${id}/generate-summary`, { method: 'POST' });
 };
 
+// AI Assistant Endpoints
+export const sendChatMessage = async (message, sessionId, isVoice = false) => {
+  const token = localStorage.getItem('token');
+  if (!token) throw new Error('No authentication token found');
+
+  const response = await fetch(`${API_BASE_URL}/assistant/chat`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({ message, session_id: sessionId, is_voice: isVoice })
+  });
+
+  if (response.status === 401) {
+    localStorage.removeItem('token');
+    window.location.href = '/';
+    throw new Error('Session expired');
+  }
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Failed to send message');
+  return data;
+};
+
+export const getChatHistory = async () => {
+  return await authFetch(`${API_BASE_URL}/assistant/history`);
+};
+

@@ -9,6 +9,7 @@ import Medicines from './pages/Medicines';
 import Reminders from './pages/Reminders';
 import Profile from './pages/Profile';
 import Settings from './pages/Settings';
+import AIAssistant from './pages/AIAssistant';
 
 // Protected Route wrapper
 const ProtectedRoute = ({ children }) => {
@@ -35,6 +36,7 @@ function App() {
           <Route path="reminders" element={<Reminders />} />
           <Route path="profile" element={<Profile />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="assistant" element={<AIAssistant />} />
         </Route>
       </Routes>
     </BrowserRouter>
