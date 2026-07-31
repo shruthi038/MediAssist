@@ -1,7 +1,14 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import DashboardLayout from './components/layout/DashboardLayout';
 import Dashboard from './pages/Dashboard';
+import Prescriptions from './pages/Prescriptions';
+import MedicalDocuments from './pages/MedicalDocuments';
+import Medicines from './pages/Medicines';
+import Reminders from './pages/Reminders';
+import Profile from './pages/Profile';
+import Settings from './pages/Settings';
 
 // Protected Route wrapper
 const ProtectedRoute = ({ children }) => {
@@ -18,14 +25,17 @@ function App() {
       <Routes>
         <Route path="/" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        <Route 
-          path="/dashboard" 
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          } 
-        />
+        
+        {/* Dashboard Routes wrapped in Layout */}
+        <Route path="/dashboard" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+          <Route index element={<Dashboard />} />
+          <Route path="prescriptions" element={<Prescriptions />} />
+          <Route path="documents" element={<MedicalDocuments />} />
+          <Route path="medicines" element={<Medicines />} />
+          <Route path="reminders" element={<Reminders />} />
+          <Route path="profile" element={<Profile />} />
+          <Route path="settings" element={<Settings />} />
+        </Route>
       </Routes>
     </BrowserRouter>
   );

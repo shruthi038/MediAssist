@@ -35,3 +35,128 @@ export const registerUser = async (fullName, email, password) => {
   }
   return data;
 };
+
+// Helper function to handle authenticated requests
+const authFetch = async (url, options = {}) => {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    throw new Error('No authentication token found');
+  }
+
+  const headers = {
+    ...options.headers,
+    'Authorization': `Bearer ${token}`
+  };
+
+  const response = await fetch(url, { ...options, headers });
+  
+  if (response.status === 401) {
+    localStorage.removeItem('token');
+    window.location.href = '/';
+    throw new Error('Session expired');
+  }
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || 'API request failed');
+  }
+  return data;
+};
+
+export const getPrescriptions = async () => {
+  return await authFetch(`${API_BASE_URL}/prescriptions`);
+};
+
+export const getDocuments = async () => {
+  return await authFetch(`${API_BASE_URL}/documents`);
+};
+
+export const uploadDocument = async (formData) => {
+  const token = localStorage.getItem('token');
+  if (!token) {
+    throw new Error('No authentication token found');
+  }
+
+  // Do not set Content-Type to application/json, let the browser set the correct multipart/form-data boundary
+  const response = await fetch(`${API_BASE_URL}/documents/upload`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`
+    },
+    body: formData
+  });
+
+  if (response.status === 401) {
+    localStorage.removeItem('token');
+    window.location.href = '/';
+    throw new Error('Session expired');
+  }
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || 'Failed to upload document');
+  }
+  return data;
+};
+
+export const getDocument = async (documentId) => {
+  return await authFetch(`${API_BASE_URL}/documents/${documentId}`);
+};
+
+export const deleteDocument = async (documentId) => {
+  return await authFetch(`${API_BASE_URL}/documents/${documentId}`, {
+    method: 'DELETE'
+  });
+};
+
+// Prescription specific endpoints
+export const uploadPrescription = async (formData) => {
+  const token = localStorage.getItem('token');
+  if (!token) throw new Error('No authentication token found');
+
+  const response = await fetch(`${API_BASE_URL}/prescriptions/upload`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+    body: formData
+  });
+
+  if (response.status === 401) {
+    localStorage.removeItem('token');
+    window.location.href = '/';
+    throw new Error('Session expired');
+  }
+
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || 'Failed to upload prescription');
+  return data;
+};
+
+export const getPrescriptionDetails = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}`);
+};
+
+export const deletePrescription = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}`, { method: 'DELETE' });
+};
+
+export const getPrescriptionFileUrl = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}/file`);
+};
+
+// AI Pipeline Orchestration Endpoints
+export const processOCR = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}/ocr`, { method: 'POST' });
+};
+
+export const extractMedicines = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}/extract-medicines`, { method: 'POST' });
+};
+
+export const generateReminders = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}/generate-reminders`, { method: 'POST' });
+};
+
+export const generateSummary = async (id) => {
+  return await authFetch(`${API_BASE_URL}/prescriptions/${id}/generate-summary`, { method: 'POST' });
+};
+
