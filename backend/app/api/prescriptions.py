@@ -12,11 +12,13 @@ from app.db.models.user import User
 from app.db.models.prescription import Prescription
 from app.db.models.medicine import Medicine
 from app.db.models.reminder import Reminder
+from app.db.models.doctor_summary import DoctorSummary
 from app.services.storage_service import StorageService
 from app.services.gemini_service import GeminiService
 from app.services.reminder_service import ReminderService
-from sqlmodel import select
+from sqlmodel import select, func
 from datetime import time
+from app.core.logger import logger
 
 router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
 
@@ -393,3 +395,260 @@ async def generate_reminders_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate reminders: {str(e)}"
         )
+
+class SummaryResponseModel(BaseModel):
+    id: str
+    summary_text: str
+    generated_at: datetime
+
+@router.post("/{prescription_id}/generate-summary", response_model=SummaryResponseModel)
+async def generate_summary_endpoint(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    # Fetch prescription
+    prescription = session.get(Prescription, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+        
+    if str(prescription.user_id) != str(current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this prescription")
+        
+    # Check if processing is complete
+    if prescription.processing_status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Medicine extraction has not been completed yet"
+        )
+        
+    # Idempotency check: see if summary already exists
+    existing_summary = session.exec(
+        select(DoctorSummary).where(DoctorSummary.prescription_id == prescription.id)
+    ).first()
+    
+    if existing_summary:
+        return SummaryResponseModel(
+            id=str(existing_summary.id),
+            summary_text=existing_summary.summary_text,
+            generated_at=existing_summary.generated_at
+        )
+        
+    # Fetch medicines
+    medicines = session.exec(
+        select(Medicine).where(Medicine.prescription_id == prescription.id)
+    ).all()
+    
+    if not prescription.raw_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="No extracted OCR text found"
+        )
+        
+    try:
+        # Call Gemini Service
+        summary_text = GeminiService.generate_doctor_summary(prescription.raw_text, medicines)
+        
+        # Save to DB
+        summary_record = DoctorSummary(
+            prescription_id=prescription.id,
+            user_id=current_user.id,
+            summary_text=summary_text
+        )
+        session.add(summary_record)
+        session.commit()
+        session.refresh(summary_record)
+        
+        return SummaryResponseModel(
+            id=str(summary_record.id),
+            summary_text=summary_record.summary_text,
+            generated_at=summary_record.generated_at
+        )
+    except Exception as e:
+        session.rollback()
+        if "rate limit" in str(e).lower():
+            raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate doctor summary: {str(e)}"
+        )
+
+# Helper function for checking ownership
+def get_user_prescription_or_404(session: Session, prescription_id: str, user_id: str) -> Prescription:
+    prescription = session.get(Prescription, prescription_id)
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+    if str(prescription.user_id) != str(user_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this prescription")
+    return prescription
+
+class PrescriptionHistoryModel(BaseModel):
+    prescription_id: str
+    upload_date: datetime
+    processing_status: str
+    original_filename: Optional[str]
+    medicine_count: int
+    reminder_count: int
+
+@router.get("", response_model=List[PrescriptionHistoryModel])
+async def get_prescription_history(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    Returns all prescriptions belonging to the authenticated user, newest first.
+    """
+    prescriptions = session.exec(
+        select(Prescription)
+        .where(Prescription.user_id == current_user.id)
+        .order_by(Prescription.uploaded_at.desc())
+    ).all()
+    
+    history = []
+    for p in prescriptions:
+        med_count = len(session.exec(select(Medicine).where(Medicine.prescription_id == p.id)).all())
+        rem_count = len(session.exec(select(Reminder).where(Reminder.prescription_id == p.id)).all())
+        
+        history.append(
+            PrescriptionHistoryModel(
+                prescription_id=str(p.id),
+                upload_date=p.uploaded_at,
+                processing_status=p.processing_status,
+                original_filename=p.original_filename,
+                medicine_count=med_count,
+                reminder_count=rem_count
+            )
+        )
+    return history
+
+class PrescriptionDetailsModel(BaseModel):
+    prescription: Prescription
+    medicines: List[ExtractedMedicine]
+    reminders: List[ReminderResponseModel]
+    doctor_summary: Optional[SummaryResponseModel]
+
+@router.get("/{prescription_id}", response_model=PrescriptionDetailsModel)
+async def get_prescription_details(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    Returns the comprehensive details of a prescription.
+    """
+    prescription = get_user_prescription_or_404(session, prescription_id, str(current_user.id))
+    
+    # Medicines
+    medicines = session.exec(select(Medicine).where(Medicine.prescription_id == prescription.id)).all()
+    med_list = [
+        ExtractedMedicine(
+            medicine_name=m.name,
+            dosage=m.dosage,
+            frequency=m.frequency,
+            duration=m.duration,
+            instructions=m.special_instructions,
+            confidence_score=1.0
+        ) for m in medicines
+    ]
+    
+    # Reminders
+    reminders = session.exec(select(Reminder).where(Reminder.prescription_id == prescription.id)).all()
+    rem_list = [
+        ReminderResponseModel(
+            id=str(r.id),
+            medicine_name=r.medicine_name,
+            dose_description=r.dose_description,
+            reminder_time=r.reminder_time,
+            frequency=r.frequency,
+            reminder_type=r.reminder_type,
+            status=r.status
+        ) for r in reminders
+    ]
+    
+    # Summary
+    summary = session.exec(select(DoctorSummary).where(DoctorSummary.prescription_id == prescription.id)).first()
+    summary_model = None
+    if summary:
+        summary_model = SummaryResponseModel(
+            id=str(summary.id),
+            summary_text=summary.summary_text,
+            generated_at=summary.generated_at
+        )
+        
+    return PrescriptionDetailsModel(
+        prescription=prescription,
+        medicines=med_list,
+        reminders=rem_list,
+        doctor_summary=summary_model
+    )
+
+class FileResponseModel(BaseModel):
+    download_url: str
+    expires_in: int
+
+@router.get("/{prescription_id}/file", response_model=FileResponseModel)
+async def get_prescription_file(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    Returns a signed URL to securely view/download the original uploaded file.
+    """
+    prescription = get_user_prescription_or_404(session, prescription_id, str(current_user.id))
+    
+    expires_in = 3600
+    signed_url = StorageService.create_signed_url(prescription.file_path, expires_in=expires_in)
+    
+    if not signed_url:
+        raise HTTPException(status_code=500, detail="Failed to generate signed URL for the prescription file.")
+        
+    return FileResponseModel(
+        download_url=signed_url,
+        expires_in=expires_in
+    )
+
+class DeleteResponseModel(BaseModel):
+    message: str
+
+@router.delete("/{prescription_id}", response_model=DeleteResponseModel)
+async def delete_prescription(
+    prescription_id: str,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    Safely deletes a prescription and all its associated child records and storage files.
+    """
+    prescription = get_user_prescription_or_404(session, prescription_id, str(current_user.id))
+    
+    try:
+        # Delete from Supabase Storage
+        StorageService.delete_prescription(prescription.file_path)
+        
+        # Delete related Database records (Manual Cascade)
+        # Reminders
+        reminders = session.exec(select(Reminder).where(Reminder.prescription_id == prescription.id)).all()
+        for r in reminders:
+            session.delete(r)
+            
+        # Doctor Summary
+        summary = session.exec(select(DoctorSummary).where(DoctorSummary.prescription_id == prescription.id)).first()
+        if summary:
+            session.delete(summary)
+            
+        # Medicines
+        medicines = session.exec(select(Medicine).where(Medicine.prescription_id == prescription.id)).all()
+        for m in medicines:
+            session.delete(m)
+            
+        # Finally delete Prescription
+        session.delete(prescription)
+        session.commit()
+        
+        logger.info(f"Prescription {prescription_id} and all related records deleted successfully.")
+        return DeleteResponseModel(message="Prescription deleted successfully")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Failed to delete prescription {prescription_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="An error occurred while deleting the prescription.")

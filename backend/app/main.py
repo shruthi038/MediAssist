@@ -8,6 +8,13 @@ from app.db.database import engine, get_session
 from app.db.models import *
 from app.api.auth import router as auth_router
 from app.api.prescriptions import router as prescriptions_router
+from app.api.documents import router as documents_router
+from app.core.config import settings
+from app.db.database import engine
+from supabase import create_client
+
+# We want to test basic connectivity
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,6 +31,7 @@ app = FastAPI(
 
 app.include_router(auth_router)
 app.include_router(prescriptions_router)
+app.include_router(documents_router)
 
 # Allow CORS for local development
 app.add_middleware(
@@ -35,8 +43,36 @@ app.add_middleware(
 )
 
 @app.get("/")
-async def root():
-    return {"status": "Backend running"}
+def read_root():
+    return {"message": "Welcome to MediAssist API"}
+
+@app.get("/health")
+def health_check():
+    health = {
+        "status": "healthy",
+        "database": "disconnected",
+        "storage": "disconnected",
+        "gemini": "configured" if settings.GEMINI_API_KEY else "unconfigured"
+    }
+    
+    # Test DB
+    try:
+        from sqlmodel import Session, select
+        with Session(engine) as session:
+            session.exec(select(1)).first()
+            health["database"] = "connected"
+    except Exception:
+        health["status"] = "unhealthy"
+        
+    # Test Supabase Storage
+    try:
+        supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
+        buckets = supabase.storage.list_buckets()
+        health["storage"] = "connected"
+    except Exception:
+        health["status"] = "unhealthy"
+        
+    return health
 
 @app.get("/health/db")
 async def health_db(session: Session = Depends(get_session)):

@@ -1,5 +1,7 @@
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from app.core.config import settings
+from app.core.logger import logger
 
 # Configure Gemini API
 if settings.GEMINI_API_KEY:
@@ -41,12 +43,21 @@ class GeminiService:
             prompt
         ]
         
-        response = model.generate_content(contents)
-        
-        if not response.text:
-            raise Exception("Gemini returned an empty response")
+        try:
+            response = model.generate_content(contents)
             
-        return response.text
+            if not response.text:
+                logger.error("Gemini OCR returned an empty response")
+                raise ValueError("Gemini returned an empty response")
+                
+            logger.info("OCR extraction completed successfully")
+            return response.text
+        except google_exceptions.ResourceExhausted:
+            logger.error("Gemini API rate limit exceeded during OCR")
+            raise Exception("Gemini API rate limit exceeded. Please retry after a few seconds.")
+        except google_exceptions.GoogleAPICallError as e:
+            logger.error(f"Gemini API error during OCR: {str(e)}")
+            raise Exception(f"Gemini API error: {str(e)}")
 
     @staticmethod
     def extract_medicines(raw_text: str) -> list:
@@ -79,20 +90,20 @@ class GeminiService:
             f"Prescription Text:\n{raw_text}"
         )
         
-        # Generation config to ensure JSON response if supported, though prompt instructions are usually sufficient.
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(response_mime_type="application/json")
-        )
-        
-        if not response.text:
-            raise Exception("Gemini returned an empty response")
-            
-        import json
+        # Generation config to ensure JSON response if supported
         try:
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.GenerationConfig(response_mime_type="application/json")
+            )
+            
+            if not response.text:
+                logger.error("Gemini returned an empty response during medicine extraction")
+                raise ValueError("Gemini returned an empty response")
+                
+            import json
             # Safely parse JSON. 
             text = response.text.strip()
-            # Strip markdown block if model ignored the prompt instruction
             if text.startswith("```json"):
                 text = text[7:]
             if text.startswith("```"):
@@ -103,6 +114,81 @@ class GeminiService:
             medicines = json.loads(text.strip())
             if not isinstance(medicines, list):
                 raise ValueError("Expected a JSON array")
+                
+            logger.info(f"Successfully extracted {len(medicines)} medicines")
             return medicines
+            
+        except google_exceptions.ResourceExhausted:
+            logger.error("Gemini API rate limit exceeded during medicine extraction")
+            raise Exception("Gemini API rate limit exceeded. Please retry after a few seconds.")
+        except google_exceptions.GoogleAPICallError as e:
+            logger.error(f"Gemini API error during medicine extraction: {str(e)}")
+            raise Exception(f"Gemini API error: {str(e)}")
         except Exception as e:
-            raise Exception(f"Failed to parse Gemini response as JSON: {str(e)}\nRaw Response: {response.text}")
+            logger.error(f"Failed to parse Gemini JSON response: {str(e)}")
+            raise Exception(f"Failed to parse Gemini response as JSON: {str(e)}")
+
+    @staticmethod
+    def generate_doctor_summary(raw_text: str, medicines: list) -> str:
+        """
+        Generates a plain-text patient-friendly explanation of the prescription.
+        """
+        if not settings.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured")
+            
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        # Prepare medicines list as string context
+        medicines_str = ""
+        for med in medicines:
+            medicines_str += f"- Medicine: {med.name}, Dosage: {med.dosage}, Frequency: {med.frequency}, Duration: {med.duration}, Instructions: {med.special_instructions}\n"
+            
+        prompt = (
+            "You are a helpful, professional, and compassionate medical AI assistant explaining a prescription to a patient.\n"
+            "Based on the OCR text and extracted medicines below, generate a clear, patient-friendly summary.\n\n"
+            "STRICT FORMATTING RULES:\n"
+            "1. Output clean Markdown formatting with headings and bullet points.\n"
+            "2. Use the exact structure below.\n\n"
+            "REQUIRED STRUCTURE:\n"
+            "# Prescription Summary\n"
+            "[Brief explanation of the prescription]\n\n"
+            "## Medicines\n"
+            "- [Medicine Name]\n"
+            "  - Purpose: [Purpose]\n"
+            "  - Dosage: [Dosage]\n"
+            "  - Frequency: [Frequency]\n\n"
+            "## How to Take Your Medicines\n"
+            "[Simple patient-friendly explanation]\n\n"
+            "## Important Advice\n"
+            "- [Bullet points]\n\n"
+            "## When to Contact a Doctor\n"
+            "- [Bullet points]\n\n"
+            "## Disclaimer\n"
+            "[Clearly mention this is AI-generated and not a substitute for professional medical advice]\n\n"
+            "STRICT SAFETY RULES:\n"
+            "- NEVER diagnose diseases.\n"
+            "- NEVER guess missing information.\n"
+            "- NEVER invent medicine purposes if you are uncertain. If you don't confidently know what a medicine is for, say so.\n"
+            "- NEVER replace professional medical advice.\n"
+            "- Clearly state uncertainty whenever appropriate.\n"
+            "- Your tone must be reassuring but completely clear about these limitations.\n\n"
+            f"--- OCR TEXT ---\n{raw_text}\n\n"
+            f"--- EXTRACTED MEDICINES ---\n{medicines_str}"
+        )
+        
+        try:
+            response = model.generate_content(prompt)
+            
+            if not response.text:
+                logger.error("Gemini returned an empty response during summary generation")
+                raise ValueError("Gemini returned an empty response")
+                
+            logger.info("Successfully generated doctor summary")
+            return response.text.strip()
+            
+        except google_exceptions.ResourceExhausted:
+            logger.error("Gemini API rate limit exceeded during summary generation")
+            raise Exception("Gemini API rate limit exceeded. Please retry after a few seconds.")
+        except google_exceptions.GoogleAPICallError as e:
+            logger.error(f"Gemini API error during summary generation: {str(e)}")
+            raise Exception(f"Gemini API error: {str(e)}")

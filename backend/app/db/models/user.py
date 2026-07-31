@@ -19,3 +19,4 @@ class User(SQLModel, table=True):
     prescriptions: List["Prescription"] = Relationship(back_populates="user")
     reminders: List["Reminder"] = Relationship(back_populates="user")
     chat_histories: List["ChatHistory"] = Relationship(back_populates="user")
+    medical_documents: List["MedicalDocument"] = Relationship(back_populates="user")
